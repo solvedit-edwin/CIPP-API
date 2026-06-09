@@ -27,5 +27,4 @@ jobs:
           app-name: 'cippsolveditatut5'
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_1EBE9D73F9EC4528BA666FC934055536 }}
-          sku: 'flexconsumption'
         
