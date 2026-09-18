@@ -7,8 +7,16 @@ function Get-CIPPSPOTenant {
         # Only meaningful alongside SharepointPrefix. Sovereign clouds are not on sharepoint.com
         # (see Get-SharePointAdminLink), so a prefix on its own cannot build the admin URL.
         [string]$SharepointDomain = 'sharepoint.com',
-        [switch]$SkipCache
+        [switch]$SkipCache,
+        # SharePoint app-only auth requires a certificate (secret app-only is rejected by SPO with
+        # 'Unsupported app only token'). When set, authenticate app-only with the SAM certificate
+        # instead of the default delegated (refresh-token) context.
+        [switch]$UseCertificate
     )
+
+    # Threaded onto every SPO admin call below; empty = unchanged delegated behaviour.
+    $AuthSplat = @{}
+    if ($UseCertificate) { $AuthSplat['AsApp'] = $true; $AuthSplat['UseCertificate'] = $true }
 
     if (!$SharepointPrefix) {
         # get sharepoint admin site
@@ -46,7 +54,21 @@ function Get-CIPPSPOTenant {
     }
 
     # $AdminUrl, not $SharePointInfo.AdminUrl - the latter is empty when a prefix was supplied.
-    $Results = New-GraphPostRequest -scope "$($AdminUrl)/.default" -tenantid $TenantFilter -Uri "$($AdminUrl)/_vti_bin/client.svc/ProcessQuery" -Type POST -Body $XML -ContentType 'text/xml' -AddedHeaders $AdditionalHeaders
+    try {
+        $Results = New-GraphPostRequest -scope "$($AdminUrl)/.default" -tenantid $TenantFilter -Uri "$($AdminUrl)/_vti_bin/client.svc/ProcessQuery" -Type POST -Body $XML -ContentType 'text/xml' -AddedHeaders $AdditionalHeaders @AuthSplat
+    } catch {
+        # The admin endpoint answers a bare 401 when the CIPP service principal holds no SharePoint
+        # app-only consent in the tenant - the token is issued fine, SharePoint just refuses it. That
+        # is a standing configuration state, not a transient fault: every retry and every nightly run
+        # gets the same answer until someone resets the CPV permissions. Flag it so callers can tell
+        # it apart from a real failure, and say what fixes it - 'Failed: 401 UNAUTHORIZED' does not.
+        if ($_.Exception.Message -match '\b401\b|unauthorized') {
+            $AccessDenied = [System.Exception]::new("SharePoint admin access denied for $TenantFilter ($AdminUrl returned 401). The CIPP service principal is missing SharePoint app-only consent in this tenant - reset its CPV permissions to restore it.", $_.Exception)
+            $AccessDenied.Data['SPOAccessDenied'] = $true
+            throw $AccessDenied
+        }
+        throw
+    }
 
     # SharepointDomain rides along with the prefix so Set-CIPPSPOTenant can rebuild the same
     # admin URL from the pipeline (and from this cache row) without assuming .com.
